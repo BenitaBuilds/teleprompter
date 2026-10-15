@@ -111,9 +111,9 @@ button.primary{background:var(--accent);color:var(--accent-text);border-color:va
 const $=id=>document.getElementById(id);
 const script=$('script'),speed=$('speed'),size=$('size'),speed2=$('speed2'),size2=$('size2');
 const view=$('view'),text=$('text'),prompter=$('prompter'),cam=$('cam'),vid=$('vid');
-const ctx=cam.getContext('2d'),small=document.createElement('canvas'),sctx=small.getContext('2d');
+const ctx=cam.getContext('2d',{alpha:false}),small=document.createElement('canvas'),sctx=small.getContext('2d');
 const mask=document.createElement('canvas'),mctx=mask.getContext('2d'),layer=document.createElement('canvas'),lctx=layer.getContext('2d');
-let rstream=null,drawing=false,fl=null,lm=null,lastT=-1,lastDet=0,showOrig=false,flFailed=false;
+let rstream=null,cbId=0,drawing=false,fl=null,lm=null,lastT=-1,lastDet=0,showOrig=false,flFailed=false;
 let stream=null,cur=null,takes=[],recording=false,playing=false,pos=0,last=0,raf=0,wake=null,splitT=0,t0=0,timerI=0,mime='';
 
 function load(){try{const s=JSON.parse(localStorage.getItem('tp3')||'{}');
@@ -130,9 +130,10 @@ function setPlaying(p){playing=p;last=0;$('play').textContent=p?'Pause':'Play';c
 
 async function openCam(){
  if(stream)stream.getTracks().forEach(t=>t.stop());
- stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}},audio:true});
+ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}},audio:true});
  vid.srcObject=stream;await vid.play();
  const cs=cam.captureStream(30);stream.getAudioTracks().forEach(t=>cs.addTrack(t));rstream=cs;
+ try{if(cbId&&vid.cancelVideoFrameCallback)vid.cancelVideoFrameCallback(cbId);}catch(e){}
  if(!drawing){drawing=true;draw();}
 }
 async function keepAwake(){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen');}catch(e){}}
@@ -157,7 +158,7 @@ $('start').onclick=async()=>{
  prompter.classList.add('on');pos=0;view.scrollTop=0;setPlaying(false);keepAwake();initFace();
 };
 
-function pickMime(){const c=['video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+function pickMime(){const c=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1,mp4a.40.2','video/mp4;codecs=h264,aac','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
  return c.find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m))||'';}
 function beginTake(){
  const parts=[];const r=new MediaRecorder(rstream||stream,mime?{mimeType:mime,videoBitsPerSecond:3000000}:{});
@@ -187,18 +188,19 @@ function addTake(blob,type){
 function showTakes(){
  const box=$('takes');box.innerHTML='<h2>Your recordings</h2><p>Tap Save for each one. Do not close this page until all parts are saved.</p>';
  takes.forEach((t,i)=>{const d=document.createElement('div');d.className='take';
-  d.innerHTML='<span>Part '+(i+1)+' ('+(t.blob.size/1048576).toFixed(1)+' MB)</span>';
+  const aac=/mp4a|aac/i.test(t.type),mp4=t.type.includes('mp4');d.innerHTML='<span>Part '+(i+1)+' ('+(t.blob.size/1048576).toFixed(1)+' MB)<br><small>'+(mp4?(aac?'MP4 with AAC sound (plays everywhere)':'MP4, sound may not play in WhatsApp'):'WebM, convert before sharing')+'</small></span>';
   const b=document.createElement('button');b.textContent='Save';b.onclick=()=>saveTake(t);d.appendChild(b);box.appendChild(d);});
  const c=document.createElement('button');c.textContent='Back to camera';c.onclick=()=>box.classList.remove('on');box.appendChild(c);
  box.classList.add('on');
 }
 async function saveTake(t){
- const f=new File([t.blob],t.name,{type:t.type});
- try{if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f]});return;}}catch(e){if(e&&e.name==='AbortError')return;}
- const a=document.createElement('a');a.href=URL.createObjectURL(t.blob);a.download=t.name;document.body.appendChild(a);a.click();a.remove();
+ const f=new File([t.blob],t.name,{type:t.type.split(';')[0]});
+ try{if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f]});t.saved=true;return;}}catch(e){if(e&&e.name==='AbortError')return;}
+ const a=document.createElement('a');a.href=URL.createObjectURL(t.blob);a.download=t.name;document.body.appendChild(a);a.click();a.remove();t.saved=true;
 }
 $('rec').onclick=()=>{
  if(recording){stopRec();return;}
+ if(takes.some(t=>!t.saved)&&!confirm('You have recordings that are not saved yet. If you record again they will be lost. Record anyway?'))return;
  const c=$('count');c.style.display='flex';let n=3;c.textContent=n;
  const i=setInterval(()=>{n--;if(n>0)c.textContent=n;else{clearInterval(i);c.style.display='none';startRec();}},1000);
 };
@@ -207,7 +209,7 @@ $('top').onclick=()=>{pos=0;view.scrollTop=0;};
 $('flipText').onclick=()=>{text.style.transform=text.style.transform==='scaleX(-1)'?'none':'scaleX(-1)';};
 $('exit').onclick=()=>{
  if(recording){if(confirm('Recording is running. Stop recording now?'))stopRec();return;}
- if(takes.length&&!confirm('Leave now? Make sure you saved your recordings.'))return;
+ if(takes.some(t=>!t.saved)&&!confirm('Leave now? Make sure you saved your recordings.'))return;
  setPlaying(false);drawing=false;if(stream)stream.getTracks().forEach(t=>t.stop());
  try{if(wake)wake.release();}catch(e){}
  takes=[];prompter.classList.remove('on');$('takes').classList.remove('on');
@@ -246,13 +248,14 @@ function stickers(L,w,h,t){
  else if(ar==='sparkles'){for(let k=0;k<6;k++){ctx.font=(fw*(.16+.06*Math.sin(t/300+k*2)))+'px serif';ctx.fillText('✨',Math.cos(k*1.1+1)*fw*.62,Math.sin(k*1.3)*fw*.5+fw*.35);}}
  ctx.restore();
 }
+function nextFrame(){if(vid.requestVideoFrameCallback)cbId=vid.requestVideoFrameCallback(draw);else requestAnimationFrame(draw);}
 function draw(){
  if(!drawing)return;
  if(vid.videoWidth){
   const w=vid.videoWidth,h=vid.videoHeight;
   if(cam.width!==w){cam.width=w;cam.height=h;layer.width=w;layer.height=h;small.width=Math.max(16,w/3|0);small.height=Math.max(16,h/3|0);mask.width=Math.max(16,w/12|0);mask.height=Math.max(16,h/12|0);}
   ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;ctx.drawImage(vid,0,0,w,h);
-  if(showOrig&&!recording){requestAnimationFrame(draw);return;}
+  if(showOrig&&!recording){nextFrame();return;}
   const S=LV[$('level').value].s,BL=bv('b3')*.8,LP=bv('b4')*.8,now=performance.now();
   const br=$('lb').value/100,wm=$('lw').value/100,co=$('lc').value/100,ar=$('ar').value;
   const needFace=S>0||BL>0||LP>0||ar!=='none';
@@ -277,7 +280,7 @@ function draw(){
    stickers(L,w,h,now);
   }
  }
- requestAnimationFrame(draw);
+ nextFrame();
 }
 try{if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');}catch(e){}
 load();
